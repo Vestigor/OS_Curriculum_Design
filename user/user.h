@@ -24,6 +24,11 @@ char* sbrk(int);
 int sleep(int);
 int uptime(void);
 
+int trace(int);
+struct sysinfo;                    // 声明结构体存在
+int sysinfo(struct sysinfo *); // 声明系统调用函数
+
+
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);
