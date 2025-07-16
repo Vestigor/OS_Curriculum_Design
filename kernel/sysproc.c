@@ -7,6 +7,7 @@
 #include "spinlock.h"
 #include "proc.h"
 
+
 uint64
 sys_exit(void)
 {
@@ -77,10 +78,36 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
+extern pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 base;        // 起始虚拟地址
+  int len;            // 检查页数
+  uint64 user_mask;   // 用户空间掩码地址
+
+  if (argaddr(0, &base) < 0 || argint(1, &len) < 0 || argaddr(2, &user_mask) < 0)
+    return -1;
+  if (len < 0 || len > 64) // 最多64页，适配64位掩码
+    return -1;
+
+  struct proc *p = myproc();
+  uint64 mask = 0;
+
+  for (int i = 0; i < len; i++) {
+    uint64 va = base + i * PGSIZE;
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte && (*pte & PTE_V)) {
+      if (*pte & PTE_A) {
+        mask |= (1UL << i);   // 设置对应位
+        *pte &= ~PTE_A;       // 清除访问位
+      }
+    }
+  }
+
+  if (copyout(p->pagetable, user_mask, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
   return 0;
 }
 #endif
@@ -107,3 +134,4 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
