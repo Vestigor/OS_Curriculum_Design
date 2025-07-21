@@ -303,22 +303,26 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    if(flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
+    }
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    // 增加页面引用计数
+    incref((void*)pa);
   }
   return 0;
 
@@ -340,6 +344,57 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+int
+cowfault(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *newpa;
+  
+  // 地址必须在用户空间范围内
+  if(va >= MAXVA)
+    return -1;
+  
+  // 获取 PTE
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+  
+  // 检查页面是否存在且标记为 COW
+  if((*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0)
+    return -1;
+  
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  
+  // 检查引用计数
+  int ref = getref((void*)pa);
+  if(ref == 1) {
+    // 只有一个引用，直接修改权限即可
+    flags = (flags & ~PTE_COW) | PTE_W;
+    *pte = PA2PTE(pa) | flags;
+    return 0;
+  }
+  
+  // 多个引用，需要复制页面
+  newpa = kalloc();
+  if(newpa == 0)
+    return -1;
+  
+  // 复制页面内容
+  memmove(newpa, (char*)pa, PGSIZE);
+  
+  // 更新 PTE
+  flags = (flags & ~PTE_COW) | PTE_W;
+  *pte = PA2PTE(newpa) | flags;
+  
+  // 减少原页面的引用计数
+  kfree((void*)pa);
+  
+  return 0;
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -347,12 +402,22 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
+    // 先检查是否需要处理 COW
+    pte = walk(pagetable, va0, 0);
+    if(pte && (*pte & PTE_COW)) {
+      if(cowfault(pagetable, va0) < 0)
+        return -1;
+      pa0 = walkaddr(pagetable, va0);
+    }
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
