@@ -31,6 +31,21 @@ barrier()
   // then increment bstate.round.
   //
   
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  
+  bstate.nthread++;
+  
+  if (bstate.nthread == nthread) {
+    // 最后一个线程到达时唤醒所有等待的线程并开始新一轮
+    bstate.round++;
+    bstate.nthread = 0;
+    pthread_cond_broadcast(&bstate.barrier_cond); // 唤醒所有等待线程
+  } else {
+    // 等待其他线程到达
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+  
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
