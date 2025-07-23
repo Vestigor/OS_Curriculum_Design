@@ -102,6 +102,36 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+    
+  acquire(&e1000_lock);  // 获取锁
+  
+  // 获取当前 TX 环的索引
+  uint32 tdt = regs[E1000_TDT];
+  
+  // 检查环是否已满 - 如果 DD 位没有设置，说明之前的传输还没完成
+  if((tx_ring[tdt].status & E1000_TXD_STAT_DD) == 0) {
+    // 环已满，返回错误
+    release(&e1000_lock);  // 释放锁
+    return -1;
+  }
+  
+  // 释放之前在这个描述符位置传输的 mbuf（如果有的话）
+  if(tx_mbufs[tdt] != 0) {
+    mbuffree(tx_mbufs[tdt]);
+  }
+  
+  // 填充描述符
+  tx_ring[tdt].addr = (uint64)m->head;  // 数据包内容的地址
+  tx_ring[tdt].length = m->len;         // 数据包长度
+  tx_ring[tdt].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;  // 设置必要的命令标志
+  
+  // 保存 mbuf 指针，以便稍后释放
+  tx_mbufs[tdt] = m;
+  
+  // 更新环位置
+  regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
+  
+  release(&e1000_lock);  // 释放锁
   
   return 0;
 }
@@ -115,6 +145,55 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  // 计算下一个待处理的接收包索引
+  uint32 rdt = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  
+  // 处理所有可用的包
+  while(1) {
+    // 检查是否有新包可用，如果没有新包，停止处理
+    if((rx_ring[rdt].status & E1000_RXD_STAT_DD) == 0) {
+      break;
+    }
+    // 检查数据包的长度是否超过了mbuf 的最大大小
+    if (rx_ring[rdt].length > MBUF_SIZE) {
+    panic("MBUF_SIZE OVERFLOW!");
+    }
+    
+    // 获取当前 mbuf
+    struct mbuf *m = rx_mbufs[rdt];
+    
+    // 更新 mbuf 的长度为描述符中报告的长度
+    m->len = rx_ring[rdt].length;
+    
+    // 将 mbuf 传递给网络栈
+    net_rx(m);
+    
+    // 分配新的 mbuf 来替换刚刚传递的那个
+    struct mbuf *new_m = mbufalloc(0);
+    if(new_m == 0) {
+      // 检查内存分配是否失败
+      panic("e1000_recv: mbufalloc failed");
+    }
+    
+    // 将新 mbuf 的数据指针编程到描述符中
+    rx_ring[rdt].addr = (uint64)new_m->head;
+    rx_ring[rdt].status = 0;  // 清除状态位
+    
+    // 保存新的 mbuf 指针
+    rx_mbufs[rdt] = new_m;
+    
+    // 移动到下一个描述符
+    rdt = (rdt + 1) % RX_RING_SIZE;
+  }
+  
+  // 更新 RDT 寄存器为最后处理的描述符索引
+  if(rdt == 0) {
+    regs[E1000_RDT] = RX_RING_SIZE - 1;
+  } else {
+    regs[E1000_RDT] = rdt - 1;
+  }
+
 }
 
 void
